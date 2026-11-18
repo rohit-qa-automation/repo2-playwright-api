@@ -1,0 +1,85 @@
+name: API tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *' # daily run: catches changes or outages in the public API
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: API tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+      # No browser install needed: the suite only uses Playwright's API client.
+      - name: Run tests
+        run: npx playwright test
+        env:
+          CI: true
+
+      - uses: actions/setup-java@v4
+        if: ${{ !cancelled() }}
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Generate Allure report
+        if: ${{ !cancelled() }}
+        run: npm run allure:generate
+
+      - name: Build Pages site
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p site
+          cp -r playwright-report site/playwright
+          cp -r allure-report site/allure
+          cat > site/index.html <<'HTML'
+          <!doctype html><meta charset="utf-8"><title>API test reports</title>
+          <h1>API test reports</h1>
+          <ul><li><a href="playwright/">Playwright HTML report</a></li>
+          <li><a href="allure/">Allure report</a></li></ul>
+          HTML
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: html-reports
+          path: site
+          retention-days: 14
+      - uses: actions/upload-pages-artifact@v3
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        with:
+          path: site
+
+  # Publishing to GitHub Pages only happens from main (not from PRs).
+  deploy:
+    name: Publish reports to GitHub Pages
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
